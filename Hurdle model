@@ -1,0 +1,125 @@
+#############################################
+# HURDLE MODEL: PRESENCE (BINOMIAL) + ABUNDANCE (GAMMA)
+# Author: DAVIDE CARNIATO
+# Date: 05/2025
+#############################################
+
+# -------------------------------------------
+# 1. LOAD REQUIRED LIBRARIES
+# -------------------------------------------
+library(dplyr)
+library(ggplot2)
+library(glmmTMB)
+library(DHARMa)
+library(effects)
+library(performance)
+
+# -------------------------------------------
+# 2. DATA PREPARATION
+# -------------------------------------------
+# Replace 'your_data' with your dataframe
+df <- your_data
+
+# Format variables
+df <- df %>%
+  mutate(
+    year = as.factor(year),                 # Convert year to factor
+    Grid = as.character(Grid),              # Grouping variable as character
+    IKA_c = as.numeric(IKA_c),              # Continuous IKA count
+    IKA_l = as.numeric(IKA_l),              # Another IKA metric
+    major_habitat = as.factor(major_habitat),
+    IKA_pos_c = ifelse(IKA_c > 0, 1, 0),   # Presence/absence (binary)
+    IKA_pos_l = ifelse(IKA_l > 0, 1, 0)    # Presence/absence (binary)
+  )
+
+# Optionally remove unwanted habitats
+df <- df %>%
+  filter(!major_habitat %in% c("urban", "forest"))
+
+# -------------------------------------------
+# 3. PRESENCE MODEL (BINOMIAL: IKA > 0)
+# -------------------------------------------
+model_presence <- glmmTMB(
+  IKA_pos_l ~ year + major_habitat + (1 | Grid),
+  family = binomial(),
+  data = df
+)
+
+# Model summary
+summary(model_presence)
+
+# Model diagnostics
+sim_res <- simulateResiduals(model_presence)
+plot(sim_res)                    # Residual diagnostics plot
+testDispersion(sim_res)          # Over/under-dispersion test
+testZeroInflation(sim_res)       # Zero-inflation test
+check_overdispersion(model_presence)
+
+# -------------------------------------------
+# 4. INTENSITY MODEL (GAMMA: IKA | IKA > 0)
+# -------------------------------------------
+model_positive <- glmmTMB(
+  IKA_l ~ year + major_habitat + (1 | Grid),
+  family = Gamma(link = "log"),
+  data = filter(df, IKA_l > 0)
+)
+
+summary(model_positive)
+
+# Model diagnostics
+sim_res_gamma <- simulateResiduals(model_positive)
+plot(sim_res_gamma)
+
+# -------------------------------------------
+# 5. EFFECTS PLOTS FOR PRESENCE MODEL
+# -------------------------------------------
+eff <- allEffects(model_presence)
+plot(eff, "year")   # Visualize effect of year
+
+# -------------------------------------------
+# 6. HURDLE MODEL PREDICTIONS (GENERAL TREND)
+# -------------------------------------------
+
+# 1. Create new data grid for predictions
+pred_data_all <- expand.grid(
+  year = levels(df$year),
+  major_habitat = levels(df$major_habitat),
+  Grid = "dummy"          # dummy for random effect
+)
+
+# 2. Predict probability of presence
+pred_data_all$prob_presence <- predict(
+  model_presence,
+  newdata = pred_data_all,
+  type = "response",
+  allow.new.levels = TRUE
+)
+
+# 3. Predict expected IKA given presence
+pred_data_all$expected_IKA_given_presence <- predict(
+  model_positive,
+  newdata = pred_data_all,
+  type = "response",
+  allow.new.levels = TRUE
+)
+
+# 4. Combine presence and intensity (hurdle)
+pred_data_all$expected_IKA <- pred_data_all$prob_presence *
+  pred_data_all$expected_IKA_given_presence
+
+# 5. Calculate mean expected IKA per year (general trend)
+pred_data_general <- pred_data_all %>%
+  group_by(year) %>%
+  summarise(expected_IKA = mean(expected_IKA, na.rm = TRUE))
+
+# 6. Plot general trend
+ggplot(pred_data_general, aes(x = year, y = expected_IKA, group = 1)) +
+  geom_line(size = 1.2, color = "blue") +
+  geom_point(size = 2, color = "blue") +
+  labs(
+    title = "General Trend of IKA",
+    x = "",
+    y = "Predicted IKA"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
