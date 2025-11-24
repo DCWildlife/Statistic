@@ -1,0 +1,139 @@
+#############################################
+# Multinomial Time series analysis 
+# Author: DAVIDE CARNIATO
+# Date: 03/2025
+#############################################
+
+# Load libraries
+library(dplyr)
+library(lubridate)
+library(nnet)      # Multinomial logistic regression
+library(readxl)    # Reading Excel
+library(reshape2)  # Reshaping
+library(ggplot2)   # Plotting
+library(lmtest)    # Durbin-Watson test
+
+# -----------------------------
+# 1. Load Data
+# -----------------------------
+file_path <- "path/to/your/excel/file.xlsx"
+hare_data <- read_excel(file_path, sheet = "Observations")
+
+# Ensure correct column names
+colnames(hare_data) <- make.names(colnames(hare_data))
+
+# -----------------------------
+# 2. Convert Dates
+# -----------------------------
+hare_data$Start_date <- as.Date(hare_data$Start.date, format = "%d/%m/%Y")
+
+# -----------------------------
+# 3. Aggregate Colour Trends
+# -----------------------------
+color_trend <- aggregate(hare_data$colour,
+                         by = list(Date = hare_data$Start_date, Colour = hare_data$colour),
+                         FUN = length)
+colnames(color_trend) <- c("Date", "Colour", "Count")
+
+# Total observations per day
+total_per_day <- aggregate(Count ~ Date, data = color_trend, FUN = sum)
+
+# Merge totals and calculate probability
+color_trend <- merge(color_trend, total_per_day, by = "Date", suffixes = c("", "_Total"))
+color_trend$Probability <- color_trend$Count / color_trend$Count_Total
+
+# -----------------------------
+# 4. Plot Colour Probabilities Over Time
+# -----------------------------
+ggplot(color_trend, aes(x = Date, y = Probability, color = Colour, group = Colour)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Probability of Hare Colors Over Time", x = "Date", y = "Probability") +
+  theme_minimal()
+
+# -----------------------------
+# 5. Latitude Classification
+# -----------------------------
+threshold <- 61  # Example threshold
+hare_data$lat_class <- ifelse(hare_data$WGS84.decimal..lat. >= threshold, "North", "South")
+
+# -----------------------------
+# 6. Define Periods
+# -----------------------------
+hare_data <- hare_data %>%
+  mutate(
+    Period = case_when(
+      Start_date >= as.Date("2022-01-01") & Start_date <= as.Date("2022-03-31") ~ "Q1",
+      Start_date >= as.Date("2022-04-01") & Start_date <= as.Date("2022-06-30") ~ "Q2",
+      Start_date >= as.Date("2022-07-01") & Start_date <= as.Date("2022-09-30") ~ "Q3",
+      Start_date >= as.Date("2022-10-01") & Start_date <= as.Date("2022-12-31") ~ "Q4"
+    ),
+    PeriodNum = as.numeric(factor(Period, levels = c("Q1", "Q2", "Q3", "Q4")))
+  )
+
+# -----------------------------
+# 7. Ensure Correct Data Types
+# -----------------------------
+hare_data <- hare_data %>%
+  mutate(
+    Colour = as.factor(Colour),
+    area = as.factor(area),
+    period = as.factor(Period)
+  )
+
+# -----------------------------
+# 8. Fit Multinomial Logistic Regression
+# -----------------------------
+model <- multinom(Colour ~ snow + Altitude + latitude + Start_date + area, data = hare_data)
+summary(model)
+
+# Pearson residuals
+residuals <- residuals(model, type = "pearson")
+
+# Durbin-Watson test
+dw_test <- dwtest(residuals ~ 1)
+print(dw_test)
+
+# -----------------------------
+# 9. Predict Probabilities
+# -----------------------------
+pred_data <- expand.grid(period = levels(hare_data$period),
+                         area = levels(hare_data$area))
+pred_probs <- predict(model, newdata = pred_data, type = "probs")
+pred_data <- cbind(pred_data, pred_probs)
+
+# Reshape for plotting
+pred_data_melt <- melt(pred_data, id.vars = c("period", "area"),
+                       variable.name = "Colour", value.name = "Probability")
+
+# -----------------------------
+# 10. Normalize Probabilities
+# -----------------------------
+normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+
+pred_data_melt <- pred_data_melt %>%
+  group_by(Colour) %>%
+  mutate(Standardized_Probability = normalize(Probability))
+
+# -----------------------------
+# 11. Plot Standardized Probabilities
+# -----------------------------
+ggplot(pred_data_melt, aes(x = period, y = Standardized_Probability, color = Colour)) +
+  geom_line() +
+  facet_wrap(~ area) +
+  labs(title = "Standardized Trend of Predicted Probabilities of Hare Colour by Period",
+       x = "Period", y = "Standardized Probability (0-1)") +
+  theme_minimal()
+
+# -----------------------------
+# 12. Bar Plot: Colour vs Snow Presence
+# -----------------------------
+table_data <- table(hare_data$Colour, hare_data$Comment)
+
+barplot(table_data,
+        beside = TRUE,
+        col = c("brown", "limegreen", "darkblue"),
+        legend = rownames(table_data),
+        main = "Relationship between Fur Color and Snow Presence",
+        xlab = "",
+        ylab = "Frequency")
